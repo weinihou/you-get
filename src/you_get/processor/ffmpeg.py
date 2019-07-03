@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 
 import logging
-import os.path
+import os
 import subprocess
+import sys
 from ..util.strings import parameterize
 from ..common import print_more_compatible as print
 
@@ -21,16 +22,16 @@ def get_usable_ffmpeg(cmd):
         out, err = p.communicate()
         vers = str(out, 'utf-8').split('\n')[0].split()
         assert (vers[0] == 'ffmpeg' and vers[2][0] > '0') or (vers[0] == 'avconv')
-        #if the version is strange like 'N-1234-gd1111', set version to 2.0
         try:
-            version = [int(i) for i in vers[2].split('.')]
+            v = vers[2][1:] if vers[2][0] == 'n' else vers[2]
+            version = [int(i) for i in v.split('.')]
         except:
             version = [1, 0]
-        return cmd, version
+        return cmd, 'ffprobe', version
     except:
         return None
 
-FFMPEG, FFMPEG_VERSION = get_usable_ffmpeg('ffmpeg') or get_usable_ffmpeg('avconv') or (None, None)
+FFMPEG, FFPROBE, FFMPEG_VERSION = get_usable_ffmpeg('ffmpeg') or get_usable_ffmpeg('avconv') or (None, None, None)
 if logging.getLogger().isEnabledFor(logging.DEBUG):
     LOGLEVEL = ['-loglevel', 'info']
     STDIN = None
@@ -58,14 +59,25 @@ def ffmpeg_concat_av(files, output, ext):
     params = [FFMPEG] + LOGLEVEL
     for file in files:
         if os.path.isfile(file): params.extend(['-i', file])
-    params.extend(['-c:v', 'copy'])
-    if ext == 'mp4':
-        params.extend(['-c:a', 'aac'])
-    elif ext == 'webm':
-        params.extend(['-c:a', 'vorbis'])
-    params.extend(['-strict', 'experimental'])
+    params.extend(['-c', 'copy'])
     params.append(output)
-    return subprocess.call(params, stdin=STDIN)
+    if subprocess.call(params, stdin=STDIN):
+        print('Merging without re-encode failed.\nTry again re-encoding audio... ', end="", flush=True)
+        try: os.remove(output)
+        except FileNotFoundError: pass
+        params = [FFMPEG] + LOGLEVEL
+        for file in files:
+            if os.path.isfile(file): params.extend(['-i', file])
+        params.extend(['-c:v', 'copy'])
+        if ext == 'mp4':
+            params.extend(['-c:a', 'aac'])
+            params.extend(['-strict', 'experimental'])
+        elif ext == 'webm':
+            params.extend(['-c:a', 'opus'])
+        params.append(output)
+        return subprocess.call(params, stdin=STDIN)
+    else:
+        return 0
 
 def ffmpeg_convert_ts_to_mkv(files, output='output.mkv'):
     for file in files:
@@ -205,7 +217,7 @@ def ffmpeg_concat_mp4_to_mp4(files, output='output.mp4'):
         os.remove(file + '.ts')
     return True
 
-def ffmpeg_download_stream(files, title, ext, params={}, output_dir='.'):
+def ffmpeg_download_stream(files, title, ext, params={}, output_dir='.', stream=True):
     """str, str->True
     WARNING: NOT THE SAME PARMS AS OTHER FUNCTIONS!!!!!!
     You can basicly download anything with this function
@@ -217,7 +229,10 @@ def ffmpeg_download_stream(files, title, ext, params={}, output_dir='.'):
         output = output_dir + '/' + output
 
     print('Downloading streaming content with FFmpeg, press q to stop recording...')
-    ffmpeg_params = [FFMPEG] + ['-y', '-re', '-i']
+    if stream:
+        ffmpeg_params = [FFMPEG] + ['-y', '-re', '-i']
+    else:
+        ffmpeg_params = [FFMPEG] + ['-y', '-i']
     ffmpeg_params.append(files)  #not the same here!!!!
 
     if FFMPEG == 'avconv':  #who cares?
@@ -245,3 +260,31 @@ def ffmpeg_download_stream(files, title, ext, params={}, output_dir='.'):
             pass
 
     return True
+
+
+def ffmpeg_concat_audio_and_video(files, output, ext):
+    print('Merging video and audio parts... ', end="", flush=True)
+    if has_ffmpeg_installed:
+        params = [FFMPEG] + LOGLEVEL
+        params.extend(['-f', 'concat'])
+        params.extend(['-safe', '0'])  # https://stackoverflow.com/questions/38996925/ffmpeg-concat-unsafe-file-name
+        for file in files:
+            if os.path.isfile(file):
+                params.extend(['-i', file])
+        params.extend(['-c:v', 'copy'])
+        params.extend(['-c:a', 'aac'])
+        params.extend(['-strict', 'experimental'])
+        params.append(output+"."+ext)
+        return subprocess.call(params, stdin=STDIN)
+    else:
+        raise EnvironmentError('No ffmpeg found')
+
+
+def ffprobe_get_media_duration(file):
+    print('Getting {} duration'.format(file))
+    params = [FFPROBE]
+    params.extend(['-i', file])
+    params.extend(['-show_entries', 'format=duration'])
+    params.extend(['-v', 'quiet'])
+    params.extend(['-of', 'csv=p=0'])
+    return subprocess.check_output(params, stdin=STDIN, stderr=subprocess.STDOUT).decode().strip()
